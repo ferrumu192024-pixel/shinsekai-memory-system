@@ -370,7 +370,7 @@ def _register_archive_tools():
         tm.register_function(
             _tool_archive_list,
             name="archive_list",
-            group="default",
+            group="memory",
             description=(
                 "List all available conversation archive files with their time ranges and message counts. "
                 "Each result includes: file name, archived_at (when compaction happened), "
@@ -386,7 +386,7 @@ def _register_archive_tools():
         tm.register_function(
             _tool_archive_search,
             name="archive_search",
-            group="default",
+            group="memory",
             description=(
                 "Search historical conversation archives. "
                 "Parameters: keyword (optional, empty = return all messages in time range), "
