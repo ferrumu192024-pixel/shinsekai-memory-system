@@ -157,7 +157,7 @@ class RandomRecallManager:
             return None
 
     def _expand_keywords(self, message: str) -> Optional[List[str]]:
-        """调用 AI 将用户消息扩展为一组联想关键词"""
+        """调用 AI 将用户消息扩展为一组联想关键词（网络异常时快速失败）"""
         prompt = f"""请将以下用户消息扩展为一组联想关键词（5-10个），包括：
 - 核心概念
 - 可能相关的梗、典故、俗语
@@ -176,7 +176,8 @@ class RandomRecallManager:
                     {"role": "system", "content": "你是一个关键词扩展助手，只输出 JSON 字符串数组。"},
                     {"role": "user", "content": prompt}
                 ],
-                stream=False
+                stream=False,
+                timeout=5  # 5 秒超时，避免网络抖动时长时间阻塞
             )
             content = self._extract_response_text(response)
             if not content:
