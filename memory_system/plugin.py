@@ -89,7 +89,7 @@ class MemorySystemPlugin(PluginBase):
             "3. 如果用户没有接你的回忆话题，不要继续追问，自然过渡回当前对话。\n"
         )
 
-               archive_tool_desc = (
+        archive_tool_desc = (
             "以下记忆工具位于 memory 工具组中，与 memory_search 并列，可直接调用：\n"
             "- **archive_list**：列出所有归档文件和日记文件，含时间范围和消息数。"
             "用于确认可用数据。\n"
@@ -98,7 +98,7 @@ class MemorySystemPlugin(PluginBase):
             "- **diary_read**：读取指定日期的日记（格式 YYYYMMDD）。"
             "返回日记摘要、关键词、氛围与重要事件。用于快速了解某日话题，避免盲目搜索。\n"
         )
-        
+
         memory_priority_rule = (
             "记忆查询规则：\n"
             "当用户询问过去发生的事或提到某个时间，必须严格遵守以下优先级："
