@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.vscode/
+.idea/
+test_memory.py
+quick_test.py
+data/archives/
+logs/
