@@ -51,7 +51,7 @@ def _register_diary_tools():
         tm.register_function(
             _tool_diary_read,
             name="diary_read",
-            group="default",
+            group="memory",
             description=(
                 "Read the diary file for a specific date (format YYYYMMDD). "
                 "Returns the diary content including summary, keywords, mood, and notable_events. "
