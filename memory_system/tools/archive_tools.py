@@ -3,7 +3,7 @@ Archive tools: search and list historical conversation archives.
 
 功能说明：
     本模块提供两个 LLM 工具，用于搜索和列出通过 compact_manager 自动归档的
-    历史对话文件。归档文件为 JSON 格式，存储在 ./data/archives/ 目录下，
+    历史对话文件。归档文件为 JSON 格式，存储在 ./data/archives/<角色名>/ 目录下，
     文件名格式为 chat_archive_YYYYMMDD_HHMMSS.json。
 
 工具列表：
@@ -37,8 +37,20 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-# 归档文件存放目录，与 compact_manager.py 中保持一致
-ARCHIVE_DIR = Path("data/archives")
+# ── 记忆隔离：当前活跃角色名 ──────────────────────────────────────
+_CHARACTER_NAME = "default"
+
+
+def set_character(name: str) -> None:
+    """设置当前活跃角色名，由 plugin.py 在初始化时调用。"""
+    global _CHARACTER_NAME
+    _CHARACTER_NAME = str(name).strip() or "default"
+
+
+def _get_archive_dir() -> Path:
+    """获取当前角色的归档目录路径。"""
+    return Path("data/archives") / _CHARACTER_NAME
+
 
 # 用于从消息内容中提取 [本地时间 YYYY-MM-DD HH:MM:SS] 的正则
 _TIME_PATTERN = re.compile(r"\[本地时间\s+(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\]")
@@ -51,12 +63,13 @@ def _list_archive_files() -> List[Path]:
     Returns:
         List[Path]: 归档 JSON 文件的 Path 对象列表，若目录不存在则返回空列表。
     """
-    if not ARCHIVE_DIR.exists():
+    archive_dir = _get_archive_dir()
+    if not archive_dir.exists():
         return []
     files = sorted(
-        [f for f in ARCHIVE_DIR.glob("chat_archive_*.json") if f.is_file()],
+        [f for f in archive_dir.glob("chat_archive_*.json") if f.is_file()],
         key=lambda f: f.name,
-        reverse=True,  # 最新的在前
+        reverse=True,
     )
     return files
 
@@ -188,7 +201,6 @@ def _search_in_messages(
     keyword_lower = (keyword or "").strip().lower() if keyword else ""
     n = len(messages)
 
-    # 解析时间范围
     dt_from = None
     dt_to = None
     if from_time:
@@ -205,21 +217,17 @@ def _search_in_messages(
     for i, msg in enumerate(messages):
         content = msg.get("content") or ""
 
-        # 内容过滤（仅当有关键词时才执行）
         if keyword_lower and keyword_lower not in content.lower():
             continue
 
-        # 提取该消息的时间
         msg_dt = _extract_time_from_message(msg)
         msg_time = msg_dt.strftime("%Y-%m-%d %H:%M:%S") if msg_dt else None
 
-        # 时间范围过滤
         if dt_from and (msg_dt is None or msg_dt < dt_from):
             continue
         if dt_to and (msg_dt is None or msg_dt > dt_to):
             continue
 
-        # 收集上下文
         start = max(0, i - context)
         end = min(n, i + context + 1)
         context_msgs = []
@@ -318,7 +326,6 @@ def _tool_archive_search(
         return {"message": "没有找到任何归档文件", "results": []}
 
     total_files = len(all_files)
-    # 只扫描最新的 max_files 个文件
     files_to_scan = all_files[:max_files]
 
     all_matches = []
@@ -361,7 +368,7 @@ def _register_archive_tools():
     """
     将本模块提供的工具函数注册到全局 ToolManager 单例。
 
-    分组为 'archive'，低风险等级。
+    分组为 'memory'，低风险等级。
     模块导入时自动调用此函数。
     """
     try:
