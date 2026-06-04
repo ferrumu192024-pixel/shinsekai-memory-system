@@ -43,7 +43,19 @@ recall_logger.addHandler(console_handler)
 # ========== 日志配置结束 ==========
 
 
-ARCHIVE_DIR = Path("data/archives")
+# ── 记忆隔离：当前活跃角色名 ──────────────────────────────────────
+_CHARACTER_NAME = "default"
+
+
+def set_character(name: str) -> None:
+    """设置当前活跃角色名，由 plugin.py 在初始化时调用。"""
+    global _CHARACTER_NAME
+    _CHARACTER_NAME = str(name).strip() or "default"
+
+
+def _get_archive_dir() -> Path:
+    """获取当前角色的归档目录路径。"""
+    return Path("data/archives") / _CHARACTER_NAME
 
 
 class RandomRecallManager:
@@ -109,9 +121,10 @@ class RandomRecallManager:
 
     def _list_diary_files(self) -> List[Path]:
         """列出所有日记文件"""
-        if not ARCHIVE_DIR.exists():
+        archive_dir = _get_archive_dir()
+        if not archive_dir.exists():
             return []
-        return sorted(ARCHIVE_DIR.glob("diary_*.json"))
+        return sorted(archive_dir.glob("diary_*.json"))
 
     def _pick_random_diary(self, expanded_keywords: List[str] | None = None) -> Optional[Dict]:
         """

@@ -39,11 +39,56 @@ class MemorySystemPlugin(PluginBase):
         plugin_root: Path,
         host: PluginHostContext,
     ) -> None:
+        # ── 0. 获取当前角色名，设置记忆隔离 ──────────────────────
+        character_name = self._resolve_character_name(host)
+        self._set_character(character_name)
+
         # ── 1. 注册 LLM 工具 ──────────────────────────────────────
         self._register_tools(register)
 
         # ── 2. 注入系统提示词规则 ─────────────────────────────────
         self._patch_prompt(register)
+
+    # ── 角色名解析 ────────────────────────────────────────────────
+
+    def _resolve_character_name(self, host: PluginHostContext) -> str:
+        """从宿主上下文解析当前活跃角色名。"""
+        # 优先从 host 直接获取
+        name = getattr(host, 'character_name', None)
+        if name:
+            return str(name).strip()
+
+        # 备选：从 AppRuntime 的配置中读取第一个角色名
+        try:
+            from core.runtime.app_runtime import try_get_app_runtime
+            runtime = try_get_app_runtime()
+            if runtime and hasattr(runtime, 'config'):
+                characters = runtime.config.config.characters
+                if characters:
+                    first = characters[0]
+                    if hasattr(first, 'name'):
+                        return str(first.name).strip()
+                    return str(first).strip()
+        except Exception:
+            pass
+
+        return "default"
+
+    def _set_character(self, character_name: str) -> None:
+        """将当前角色名传递给所有需要记忆隔离的模块。"""
+        # 插件工具模块
+        import plugins.memory_system.tools.archive_tools as atools
+        atools.set_character(character_name)
+        import plugins.memory_system.tools.diary_tools as dtools
+        dtools.set_character(character_name)
+        import plugins.memory_system.random_recall as rr
+        rr.set_character(character_name)
+
+        # llm 下的核心模块
+        import llm.compact_manager as cm
+        cm.set_character(character_name)
+        import llm.diary_manager as dm
+        dm.set_character(character_name)
 
     # ── 工具注册 ──────────────────────────────────────────────────
 
