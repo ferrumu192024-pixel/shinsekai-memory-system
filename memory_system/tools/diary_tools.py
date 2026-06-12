@@ -10,21 +10,9 @@ import logging
 from pathlib import Path
 from typing import Any, Dict
 
+from plugins.memory_system.character_context import get_archive_dir
+
 logger = logging.getLogger(__name__)
-
-# ── 记忆隔离：当前活跃角色名 ──────────────────────────────────────
-_CHARACTER_NAME = "default"
-
-
-def set_character(name: str) -> None:
-    """设置当前活跃角色名，由 plugin.py 在初始化时调用。"""
-    global _CHARACTER_NAME
-    _CHARACTER_NAME = str(name).strip() or "default"
-
-
-def _get_archive_dir() -> Path:
-    """获取当前角色的归档目录路径。"""
-    return Path("data/archives") / _CHARACTER_NAME
 
 
 def _tool_diary_read(date_str: str) -> Dict[str, Any]:
@@ -41,7 +29,7 @@ def _tool_diary_read(date_str: str) -> Dict[str, Any]:
     if not date_str:
         return {"error": "date_str 不能为空"}
 
-    diary_path = _get_archive_dir() / f"diary_{date_str}.json"
+    diary_path = get_archive_dir() / f"diary_{date_str}.json"
     if not diary_path.exists():
         return {"message": f"没有找到 {date_str} 的日记文件", "date": date_str}
 
@@ -56,10 +44,14 @@ def _tool_diary_read(date_str: str) -> Dict[str, Any]:
 
 # ── 注册到 ToolManager ──────────────────────────────────────────────
 
-def _register_diary_tools():
-    try:
+def _register_diary_tools(tm=None):
+    """
+    注册日记工具。可通过 tm 参数传入 ToolManager 实例，否则使用单例。
+    """
+    if tm is None:
         from llm.tools.tool_manager import ToolManager
         tm = ToolManager()
+    try:
         tm.register_function(
             _tool_diary_read,
             name="diary_read",
@@ -75,6 +67,3 @@ def _register_diary_tools():
         logger.info("Diary tools registered successfully.")
     except Exception as e:
         logger.error(f"Failed to register diary tools: {e}")
-
-
-_register_diary_tools()

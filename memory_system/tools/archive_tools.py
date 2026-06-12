@@ -30,30 +30,14 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from plugins.memory_system.character_context import get_archive_dir
+from plugins.memory_system.memory_utils import extract_time_from_message
+
 logger = logging.getLogger(__name__)
-
-# ── 记忆隔离：当前活跃角色名 ──────────────────────────────────────
-_CHARACTER_NAME = "default"
-
-
-def set_character(name: str) -> None:
-    """设置当前活跃角色名，由 plugin.py 在初始化时调用。"""
-    global _CHARACTER_NAME
-    _CHARACTER_NAME = str(name).strip() or "default"
-
-
-def _get_archive_dir() -> Path:
-    """获取当前角色的归档目录路径。"""
-    return Path("data/archives") / _CHARACTER_NAME
-
-
-# 用于从消息内容中提取 [本地时间 YYYY-MM-DD HH:MM:SS] 的正则
-_TIME_PATTERN = re.compile(r"\[本地时间\s+(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\]")
 
 
 def _list_archive_files() -> List[Path]:
@@ -63,7 +47,7 @@ def _list_archive_files() -> List[Path]:
     Returns:
         List[Path]: 归档 JSON 文件的 Path 对象列表，若目录不存在则返回空列表。
     """
-    archive_dir = _get_archive_dir()
+    archive_dir = get_archive_dir()
     if not archive_dir.exists():
         return []
     files = sorted(
@@ -98,28 +82,6 @@ def _parse_archive_timestamp(filename: str) -> str | None:
     return None
 
 
-def _extract_time_from_message(msg: Dict[str, Any]) -> Optional[datetime]:
-    """
-    从单条消息的 content 字段中提取 [本地时间 ...] 并解析为 datetime 对象。
-
-    Args:
-        msg: 包含 'content' 字段的消息字典。
-
-    Returns:
-        解析成功的 datetime 对象，若未找到或解析失败则返回 None。
-    """
-    content = msg.get("content", "")
-    if not isinstance(content, str):
-        return None
-    match = _TIME_PATTERN.search(content)
-    if not match:
-        return None
-    try:
-        return datetime.strptime(match.group(1), "%Y-%m-%d %H:%M:%S")
-    except ValueError:
-        return None
-
-
 def _get_archive_time_range(messages: List[Dict[str, Any]]) -> tuple[Optional[str], Optional[str]]:
     """
     获取归档文件中对话的实际时间范围。
@@ -138,7 +100,7 @@ def _get_archive_time_range(messages: List[Dict[str, Any]]) -> tuple[Optional[st
     last_dt: Optional[datetime] = None
 
     for msg in messages:
-        dt = _extract_time_from_message(msg)
+        dt = extract_time_from_message(msg)
         if dt:
             if first_dt is None or dt < first_dt:
                 first_dt = dt
@@ -220,7 +182,7 @@ def _search_in_messages(
         if keyword_lower and keyword_lower not in content.lower():
             continue
 
-        msg_dt = _extract_time_from_message(msg)
+        msg_dt = extract_time_from_message(msg)
         msg_time = msg_dt.strftime("%Y-%m-%d %H:%M:%S") if msg_dt else None
 
         if dt_from and (msg_dt is None or msg_dt < dt_from):
@@ -232,7 +194,7 @@ def _search_in_messages(
         end = min(n, i + context + 1)
         context_msgs = []
         for j in range(start, end):
-            ctx_time = _extract_time_from_message(messages[j])
+            ctx_time = extract_time_from_message(messages[j])
             context_msgs.append({
                 "index": j,
                 "role": messages[j].get("role", ""),
@@ -364,16 +326,16 @@ def _tool_archive_search(
 
 # ── 工具注册 ──────────────────────────────────────────────────────
 
-def _register_archive_tools():
+def _register_archive_tools(tm=None):
     """
-    将本模块提供的工具函数注册到全局 ToolManager 单例。
+    注册归档工具。可通过 tm 参数传入 ToolManager 实例，否则使用单例。
 
     分组为 'memory'，低风险等级。
-    模块导入时自动调用此函数。
     """
-    try:
+    if tm is None:
         from llm.tools.tool_manager import ToolManager
         tm = ToolManager()
+    try:
         tm.register_function(
             _tool_archive_list,
             name="archive_list",
@@ -412,7 +374,3 @@ def _register_archive_tools():
         logger.info("Archive tools registered successfully.")
     except Exception as e:
         logger.error(f"Failed to register archive tools: {e}")
-
-
-# 模块导入时自动执行注册
-_register_archive_tools()
