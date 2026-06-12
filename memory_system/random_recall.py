@@ -11,6 +11,8 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from plugins.memory_system.character_context import get_archive_dir
+
 # ========== 独立的日志配置 ==========
 LOG_DIR = Path("logs")
 LOG_DIR.mkdir(exist_ok=True)
@@ -41,21 +43,6 @@ console_handler.setFormatter(logging.Formatter(
 recall_logger.addHandler(file_handler)
 recall_logger.addHandler(console_handler)
 # ========== 日志配置结束 ==========
-
-
-# ── 记忆隔离：当前活跃角色名 ──────────────────────────────────────
-_CHARACTER_NAME = "default"
-
-
-def set_character(name: str) -> None:
-    """设置当前活跃角色名，由 plugin.py 在初始化时调用。"""
-    global _CHARACTER_NAME
-    _CHARACTER_NAME = str(name).strip() or "default"
-
-
-def _get_archive_dir() -> Path:
-    """获取当前角色的归档目录路径。"""
-    return Path("data/archives") / _CHARACTER_NAME
 
 
 class RandomRecallManager:
@@ -121,16 +108,28 @@ class RandomRecallManager:
 
     def _list_diary_files(self) -> List[Path]:
         """列出所有日记文件"""
-        archive_dir = _get_archive_dir()
+        archive_dir = get_archive_dir()
         if not archive_dir.exists():
             return []
         return sorted(archive_dir.glob("diary_*.json"))
 
+    def _load_valid_diary(self, fp: Path) -> Optional[Dict]:
+        """读取日记文件，跳过空日记占位。返回 None 表示无效或读取失败。"""
+        try:
+            with open(fp, "r", encoding="utf-8") as f:
+                diary = json.load(f)
+            if diary.get("empty"):
+                return None
+            return diary
+        except Exception as e:
+            recall_logger.warning(f"读取日记失败 {fp}: {e}")
+            return None
+
     def _pick_random_diary(self, expanded_keywords: List[str] | None = None) -> Optional[Dict]:
         """
-        随机选一份日记。
+        随机选一份有效日记（跳过空日记占位）。
         如果有扩展关键词，优先选择 keywords 匹配的日记；
-        若没有匹配的，则从全部日记中随机选一份。
+        若没有匹配的，则从全部有效日记中随机选一份。
         """
         files = self._list_diary_files()
         if not files:
@@ -139,17 +138,15 @@ class RandomRecallManager:
         if expanded_keywords:
             candidates = []
             for fp in files:
-                try:
-                    with open(fp, "r", encoding="utf-8") as f:
-                        diary = json.load(f)
-                    diary_kw_lower = [kw.lower() for kw in diary.get("keywords", [])]
-                    for ekw in expanded_keywords:
-                        ekw_lower = ekw.lower()
-                        if any(ekw_lower in dk or dk in ekw_lower for dk in diary_kw_lower):
-                            candidates.append(diary)
-                            break
-                except Exception:
+                diary = self._load_valid_diary(fp)
+                if not diary:
                     continue
+                diary_kw_lower = [kw.lower() for kw in diary.get("keywords", [])]
+                for ekw in expanded_keywords:
+                    ekw_lower = ekw.lower()
+                    if any(ekw_lower in dk or dk in ekw_lower for dk in diary_kw_lower):
+                        candidates.append(diary)
+                        break
 
             if candidates:
                 recall_logger.info(
@@ -158,16 +155,21 @@ class RandomRecallManager:
                 return random.choice(candidates)
             else:
                 recall_logger.info(
-                    f"关键词预筛：0/{len(files)} 份日记匹配，从全部中随机选择"
+                    f"关键词预筛：0/{len(files)} 份日记匹配，从全部有效日记中随机选择"
                 )
 
-        chosen = random.choice(files)
-        try:
-            with open(chosen, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception as e:
-            recall_logger.warning(f"读取日记失败 {chosen}: {e}")
+        # 无关键词或关键词预筛无匹配 → 从全部有效日记中随机选
+        valid_files = []
+        for fp in files:
+            if self._load_valid_diary(fp) is not None:
+                valid_files.append(fp)
+
+        if not valid_files:
+            recall_logger.info("没有找到任何有效日记（所有日记均为空占位或读取失败）")
             return None
+
+        chosen = random.choice(valid_files)
+        return self._load_valid_diary(chosen)
 
     def _expand_keywords(self, message: str) -> Optional[List[str]]:
         """调用 AI 将用户消息扩展为一组联想关键词（网络异常时快速失败）"""

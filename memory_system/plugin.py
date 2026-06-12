@@ -3,6 +3,7 @@
 包括自动归档、每日日记、精准搜索和随机模糊回忆。
 """
 
+import logging
 from pathlib import Path
 
 from sdk.plugin import PluginBase
@@ -13,6 +14,72 @@ from sdk.types import (
     RequirementPatch,
     RequirementSpec,
 )
+
+from plugins.memory_system.character_context import set_character_name
+
+# ── 插件级管理器引用（避免挂在 llm_manager 上） ────────────────
+_diary_manager = None
+_random_recall = None
+
+
+def _get_or_create_managers():
+    """延迟初始化日记管理器和随机回忆管理器，保存在模块级变量中。"""
+    global _diary_manager, _random_recall
+
+    if _diary_manager is not None and _random_recall is not None:
+        return
+
+    try:
+        from core.runtime.app_runtime import try_get_app_runtime
+        runtime = try_get_app_runtime()
+        if not runtime or not hasattr(runtime, "llm_manager"):
+            return
+        llm = runtime.llm_manager
+
+        if _diary_manager is None:
+            from plugins.memory_system.diary_manager import DiaryManager
+            _diary_manager = DiaryManager(llm.llm_adapter)
+
+        if _random_recall is None:
+            from plugins.memory_system.random_recall import RandomRecallManager
+            _random_recall = RandomRecallManager(llm.llm_adapter, probability=0.03)
+    except Exception:
+        logging.getLogger("random_recall").exception(
+            "Failed to initialize diary/recall managers"
+        )
+
+
+def _memory_processor(user_input: str) -> str | None:
+    """用户输入处理器：触发日记检查 + 随机回忆。"""
+    try:
+        _get_or_create_managers()
+
+        if _diary_manager is not None:
+            from core.runtime.app_runtime import try_get_app_runtime
+            runtime = try_get_app_runtime()
+            if runtime and hasattr(runtime, "llm_manager"):
+                _diary_manager.check_and_generate(
+                    runtime.llm_manager.get_messages()
+                )
+
+        if _random_recall is not None:
+            recall = _random_recall.try_recall(user_input)
+            if recall:
+                return (
+                    user_input
+                    + f"\n【随机回忆】你突然想起了 {recall['date']} 的一件事："
+                    + f"{recall['summary']} "
+                    + "如果和当前话题相关且提起来自然，你可以顺带提一句；"
+                    + "如果不相关或不自然，忽略即可。"
+                )
+
+        return user_input
+    except Exception:
+        logging.getLogger("random_recall").exception(
+            "memory_processor failed, returning original user input"
+        )
+        return user_input
+
 
 # ── 插件基本信息 ──────────────────────────────────────────────────
 
@@ -49,12 +116,15 @@ class MemorySystemPlugin(PluginBase):
         # ── 2. 注入系统提示词规则 ─────────────────────────────────
         self._patch_prompt(register)
 
+        # ── 3. 注册消息处理器（日记检查 + 随机回忆） ─────────────
+        register.register_user_input_processor(_memory_processor)
+
     # ── 角色名解析 ────────────────────────────────────────────────
 
     def _resolve_character_name(self, host: PluginHostContext) -> str:
         """从宿主上下文解析当前活跃角色名。"""
         # 优先从 host 直接获取
-        name = getattr(host, 'character_name', None)
+        name = getattr(host, "character_name", None)
         if name:
             return str(name).strip()
 
@@ -62,11 +132,11 @@ class MemorySystemPlugin(PluginBase):
         try:
             from core.runtime.app_runtime import try_get_app_runtime
             runtime = try_get_app_runtime()
-            if runtime and hasattr(runtime, 'config'):
+            if runtime and hasattr(runtime, "config"):
                 characters = runtime.config.config.characters
                 if characters:
                     first = characters[0]
-                    if hasattr(first, 'name'):
+                    if hasattr(first, "name"):
                         return str(first.name).strip()
                     return str(first).strip()
         except Exception:
@@ -75,20 +145,8 @@ class MemorySystemPlugin(PluginBase):
         return "default"
 
     def _set_character(self, character_name: str) -> None:
-        """将当前角色名传递给所有需要记忆隔离的模块。"""
-        # 插件工具模块
-        import plugins.memory_system.tools.archive_tools as atools
-        atools.set_character(character_name)
-        import plugins.memory_system.tools.diary_tools as dtools
-        dtools.set_character(character_name)
-        import plugins.memory_system.random_recall as rr
-        rr.set_character(character_name)
-
-        # llm 下的核心模块
-        import llm.compact_manager as cm
-        cm.set_character(character_name)
-        import llm.diary_manager as dm
-        dm.set_character(character_name)
+        """将当前角色名传递给记忆系统的所有模块（通过 character_context）。"""
+        set_character_name(character_name)
 
     # ── 工具注册 ──────────────────────────────────────────────────
 
@@ -98,8 +156,8 @@ class MemorySystemPlugin(PluginBase):
         from plugins.memory_system.tools.diary_tools import _register_diary_tools
 
         def _do_register(tm):
-            _register_archive_tools()
-            _register_diary_tools()
+            _register_archive_tools(tm)
+            _register_diary_tools(tm)
 
         register.register_llm_tool(_do_register)
 
@@ -107,49 +165,10 @@ class MemorySystemPlugin(PluginBase):
 
     def _patch_prompt(self, register: PluginCapabilityRegistry) -> None:
         """以 Patch 形式向系统提示词追加记忆相关的规则"""
+        from plugins.memory_system.memory_utils import build_memory_prompt_rules
 
-        diary_recall_rule = (
-            "日记辅助回想规则：\n"
-            "当用户提到过去的事、某个日期，或当前话题可能与历史相关时：\n"
-            "0. 优先级：先查日记，再查归档。日记可快速判断当日是否有相关内容。\n"
-            "1. 调用 archive_list 查看可用的 diary_*.json 和 chat_archive_*.json 文件。\n"
-            "2. 若存在相关日期的日记，调用 diary_read 读取日记内容。\n"
-            "3. 根据日记的 summary、keywords、notable_events 判断：\n"
-            "   a. 与当前话题无关 → 不主动提起。\n"
-            "   b. 轻度相关，但不需要原文 → 用日记中的摘要信息轻描淡写带一句。\n"
-            "   c. 高度相关，需原文细节 → 调用 archive_search，以日记 date 为范围"
-            "（当天04:00 到次日03:59），用关键词搜索原始对话，自然融入回复。\n"
-            "4. 若没有对应日记但用户坚持，可直接尝试 archive_search 搜索大致时间范围。\n"
-        )
-
-        random_recall_rule = (
-            "随机回忆规则：\n"
-            "偶尔你会看到以【随机回忆】开头的系统消息，这是程序自动从历史日记中"
-            "随机检索到的记忆片段。\n"
-            "处理方式：\n"
-            "1. 如果这段记忆与当前话题相关，且提起来自然 → 在回复中顺带提一句。\n"
-            "   参考语气：\"说起来……\"\"上次你也……\"\"这让我想起……\"\"我记得那天……\"\n"
-            "2. 如果这段记忆与当前话题无关，或者提起来会显得生硬 → 完全忽略，正常回复即可。\n"
-            "   不要为了插入而插入，宁可错过一次回忆，也不要让对话变得不自然。\n"
-            "3. 如果用户没有接你的回忆话题，不要继续追问，自然过渡回当前对话。\n"
-        )
-
-        archive_tool_desc = (
-            "以下记忆工具位于 memory 工具组中，与 memory_search 并列，可直接调用：\n"
-            "- **archive_list**：列出所有归档文件和日记文件，含时间范围和消息数。"
-            "用于确认可用数据。\n"
-            "- **archive_search**：搜索历史对话归档。参数：keyword(可选), limit(默认5), "
-            "max_files(默认10), from_time, to_time。\n"
-            "- **diary_read**：读取指定日期的日记（格式 YYYYMMDD）。"
-            "返回日记摘要、关键词、氛围与重要事件。用于快速了解某日话题，避免盲目搜索。\n"
-        )
-
-        memory_priority_rule = (
-            "记忆查询规则：\n"
-            "当用户询问过去发生的事或提到某个时间，必须严格遵守以下优先级："
-            "archive 工具 > memory 工具。只有当 archive_list 返回\"没有找到任何归档文件\"时，"
-            "才允许尝试调用 memory_search。\n"
-        )
+        diary_recall_rule, random_recall_rule, memory_priority_rule, archive_tool_desc = \
+            build_memory_prompt_rules()
 
         combined_text = (
             archive_tool_desc + "\n"
