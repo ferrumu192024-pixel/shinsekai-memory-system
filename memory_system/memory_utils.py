@@ -21,8 +21,8 @@ def extract_time_from_message(msg: Dict[str, Any]) -> Optional[datetime]:
         return None
 
 
-def build_memory_prompt_rules() -> Tuple[str, str, str, str]:
-    """构建记忆系统提示词规则，返回 (diary_recall, random_recall, memory_priority, archive_tool_desc)。"""
+def build_memory_prompt_rules() -> Tuple[str, str, str]:
+    """构建记忆系统提示词规则，返回 (diary_recall, memory_priority, archive_tool_desc)。"""
     diary_recall_rule = (
         "日记辅助回想规则：\n"
         "当用户提到过去的事、某个日期，或当前话题可能与历史相关时：\n"
@@ -35,18 +35,6 @@ def build_memory_prompt_rules() -> Tuple[str, str, str, str]:
         "   c. 高度相关，需原文细节 → 调用 archive_search，以日记 date 为范围"
         "（当天04:00 到次日03:59），用关键词搜索原始对话，自然融入回复。\n"
         "4. 若没有对应日记但用户坚持，可直接尝试 archive_search 搜索大致时间范围。\n"
-    )
-
-    random_recall_rule = (
-        "随机回忆规则：\n"
-        "偶尔你会看到以【随机回忆】开头的系统消息，这是程序自动从历史日记中"
-        "随机检索到的记忆片段。\n"
-        "处理方式：\n"
-        "1. 如果这段记忆与当前话题相关，且提起来自然 → 在回复中顺带提一句。\n"
-        "   参考语气：\"说起来……\"\"上次你也……\"\"这让我想起……\"\"我记得那天……\"\n"
-        "2. 如果这段记忆与当前话题无关，或者提起来会显得生硬 → 完全忽略，正常回复即可。\n"
-        "   不要为了插入而插入，宁可错过一次回忆，也不要让对话变得不自然。\n"
-        "3. 如果用户没有接你的回忆话题，不要继续追问，自然过渡回当前对话。\n"
     )
 
     memory_priority_rule = (
@@ -66,4 +54,4 @@ def build_memory_prompt_rules() -> Tuple[str, str, str, str]:
         "返回日记摘要、关键词、氛围与重要事件。用于快速了解某日话题，避免盲目搜索。\n"
     )
 
-    return diary_recall_rule, random_recall_rule, memory_priority_rule, archive_tool_desc
+    return diary_recall_rule, memory_priority_rule, archive_tool_desc

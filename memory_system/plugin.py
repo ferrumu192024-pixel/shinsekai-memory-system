@@ -1,6 +1,6 @@
 """
 记忆系统插件：为 AI 桌宠提供长期记忆管理能力。
-包括自动归档、每日日记、精准搜索和随机模糊回忆。
+包括自动归档、每日日记、精准搜索。
 """
 
 import logging
@@ -17,9 +17,8 @@ from sdk.types import (
 
 from plugins.memory_system.character_context import set_character_name
 
-# ── 插件级管理器引用（避免挂在 llm_manager 上） ────────────────
+# ── 插件级管理器引用 ──────────────────────────────────────────────
 _diary_manager = None
-_random_recall = None
 
 
 def _on_before_compact(messages: list) -> None:
@@ -38,20 +37,20 @@ def _on_before_compact(messages: list) -> None:
         with open(archive_path, "w", encoding="utf-8") as f:
             json.dump(messages, f, ensure_ascii=False, indent=2)
 
-        logging.getLogger("random_recall").info(
+        logging.getLogger("memory_system").info(
             f"归档已保存：{archive_path}（{len(messages)} 条消息）"
         )
     except Exception:
-        logging.getLogger("random_recall").exception(
+        logging.getLogger("memory_system").exception(
             "精简前归档写入失败，跳过本次归档（不影响精简流程）"
         )
 
 
 def _get_or_create_managers():
-    """延迟初始化日记管理器和随机回忆管理器，保存在模块级变量中。"""
-    global _diary_manager, _random_recall
+    """延迟初始化日记管理器，保存在模块级变量中。"""
+    global _diary_manager
 
-    if _diary_manager is not None and _random_recall is not None:
+    if _diary_manager is not None:
         return
 
     try:
@@ -61,22 +60,20 @@ def _get_or_create_managers():
             return
         llm = runtime.llm_manager
 
-        if _diary_manager is None:
-            from plugins.memory_system.diary_manager import DiaryManager
-            _diary_manager = DiaryManager(llm.llm_adapter)
-
-        if _random_recall is None:
-            from plugins.memory_system.random_recall import RandomRecallManager
-            _random_recall = RandomRecallManager(llm.llm_adapter, probability=0.03)
+        from plugins.memory_system.diary_manager import DiaryManager
+        _diary_manager = DiaryManager(llm.llm_adapter)
     except Exception:
-        logging.getLogger("random_recall").exception(
-            "Failed to initialize diary/recall managers"
+        logging.getLogger("memory_system").exception(
+            "Failed to initialize diary manager"
         )
 
 
 def _memory_processor(user_input: str) -> str | None:
-    """用户输入处理器：触发日记检查 + 随机回忆。"""
+    """用户输入处理器：触发日记检查。"""
     try:
+        from plugins.memory_system.character_context import refresh_character_name
+        refresh_character_name()  # 每次处理前对齐当前活跃角色
+
         _get_or_create_managers()
 
         if _diary_manager is not None:
@@ -87,20 +84,9 @@ def _memory_processor(user_input: str) -> str | None:
                     runtime.llm_manager.get_messages()
                 )
 
-        if _random_recall is not None:
-            recall = _random_recall.try_recall(user_input)
-            if recall:
-                return (
-                    user_input
-                    + f"\n【随机回忆】你突然想起了 {recall['date']} 的一件事："
-                    + f"{recall['summary']} "
-                    + "如果和当前话题相关且提起来自然，你可以顺带提一句；"
-                    + "如果不相关或不自然，忽略即可。"
-                )
-
         return user_input
     except Exception:
-        logging.getLogger("random_recall").exception(
+        logging.getLogger("memory_system").exception(
             "memory_processor failed, returning original user input"
         )
         return user_input
@@ -141,7 +127,7 @@ class MemorySystemPlugin(PluginBase):
         # ── 2. 注入系统提示词规则 ─────────────────────────────────
         self._patch_prompt(register)
 
-        # ── 3. 注册消息处理器（日记检查 + 随机回忆） ─────────────
+        # ── 3. 注册消息处理器（日记检查） ─────────────────────────
         register.register_user_input_processor(_memory_processor)
 
         # ── 4. 注册精简前归档钩子 ─────────────────────────────────
