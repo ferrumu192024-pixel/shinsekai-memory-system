@@ -93,7 +93,7 @@ class RandomRecallManager:
             return None
         recall_logger.info(f"粗筛命中！匹配词：{matched_kw}")
 
-        # 5. 直接命中，不再精判——让千秋自己决定是否开口
+        # 5. 直接命中，不再精判,让AI自己决定是否开口
         recall_logger.info(
             f"命中记忆！直接注入，由 AI 自行判断是否插入。\n"
             f"  日期：{diary.get('date')}\n"
