@@ -145,11 +145,7 @@ class MemorySystemPlugin(PluginBase):
         register.register_user_input_processor(_memory_processor)
 
         # ── 4. 注册精简前归档钩子 ─────────────────────────────────
-        try:
-            from sdk.register import PluginCapabilityRegistry
-            PluginCapabilityRegistry().compact_hooks.append(_on_before_compact)
-        except Exception:
-            pass
+        register.compact_hooks.append(_on_before_compact)
 
     # ── 角色名解析 ────────────────────────────────────────────────
 
