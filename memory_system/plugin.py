@@ -181,14 +181,13 @@ class MemorySystemPlugin(PluginBase):
         """以 Patch 形式向系统提示词追加记忆相关的规则"""
         from plugins.memory_system.memory_utils import build_memory_prompt_rules
 
-        diary_recall_rule, random_recall_rule, memory_priority_rule, archive_tool_desc = \
+        diary_recall_rule, memory_priority_rule, archive_tool_desc = \
             build_memory_prompt_rules()
 
         combined_text = (
             archive_tool_desc + "\n"
             + diary_recall_rule + "\n"
             + memory_priority_rule + "\n"
-            + random_recall_rule
         )
 
         patch = OutputContractPatch(
@@ -206,11 +205,6 @@ class MemorySystemPlugin(PluginBase):
                     id="memory_system.diary_recall",
                     text=diary_recall_rule.strip(),
                     order=80,
-                ),
-                RequirementSpec(
-                    id="memory_system.random_recall",
-                    text=random_recall_rule.strip(),
-                    order=81,
                 ),
                 RequirementSpec(
                     id="memory_system.archive_priority",
