@@ -37,6 +37,7 @@ class DiaryManager:
         """
         self.llm_adapter = llm_adapter
         self._generating_lock = threading.Lock()
+        self._pending_dates: set = set()  # 正在生成日记的日期集合，防止竞态条件
         os.makedirs(get_archive_dir(), exist_ok=True)
 
     def _get_previous_day_str(self) -> str:
@@ -122,7 +123,7 @@ class DiaryManager:
         existing_dates = self._get_existing_diary_dates()
 
         for date_str in all_dates:
-            if date_str in existing_dates:
+            if date_str in existing_dates or date_str in self._pending_dates:
                 continue
 
             diary_path = get_archive_dir() / f"diary_{date_str}.json"
@@ -135,13 +136,15 @@ class DiaryManager:
         all_messages = self._merge_messages(hot_messages, cold_messages)
 
         if all_messages:
+            # 标记为正在生成，防止竞态条件导致多个线程写同一文件
+            self._pending_dates.add(date_str)
             logger.info(
                 f"准备为 {date_str} 生成日记 "
                 f"（热记忆 {len(hot_messages)} 条，冷记忆 {len(cold_messages)} 条，"
                 f"合并后 {len(all_messages)} 条）..."
             )
             thread = threading.Thread(
-                target=self._generate_diary,
+                target=self._generate_diary_with_cleanup,
                 args=(date_str, all_messages, diary_path),
                 daemon=True
             )
@@ -150,6 +153,13 @@ class DiaryManager:
             # 无对话记录，生成空日记占位
             logger.info(f"日期 {date_str} 无对话记录，生成空日记占位。")
             self._write_empty_diary(date_str, diary_path)
+
+    def _generate_diary_with_cleanup(self, date_str: str, messages: List[Dict], diary_path: Path) -> None:
+        """调用 _generate_diary，并在完成后从 _pending_dates 中移除标记。"""
+        try:
+            self._generate_diary(date_str, messages, diary_path)
+        finally:
+            self._pending_dates.discard(date_str)
 
     def _write_empty_diary(self, date_str: str, diary_path: Path) -> None:
         """写入空日记占位文件，标记该日期已检查且无对话。"""
