@@ -112,6 +112,9 @@ class DiaryManager:
             return
         _message_count = 0
 
+        # 确保当前角色目录存在（归档钩子可能尚未触发）
+        os.makedirs(get_archive_dir(), exist_ok=True)
+
         # 扫描范围：从 scan_start 到昨天
         scan_start = self._get_scan_start_date()
         yesterday = self._get_previous_day_str()
