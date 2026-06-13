@@ -192,7 +192,6 @@ class RandomRecallManager:
                     {"role": "user", "content": prompt}
                 ],
                 stream=False,
-                timeout=5  # 5 秒超时，避免网络抖动时长时间阻塞
             )
             content = self._extract_response_text(response)
             if not content:
