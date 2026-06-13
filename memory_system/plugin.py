@@ -22,6 +22,31 @@ _diary_manager = None
 _random_recall = None
 
 
+def _on_before_compact(messages: list) -> None:
+    """精简前钩子：将完整对话写入归档文件。"""
+    try:
+        from datetime import datetime
+        import json
+        from plugins.memory_system.character_context import get_archive_dir
+
+        archive_dir = get_archive_dir()
+        archive_dir.mkdir(parents=True, exist_ok=True)
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        archive_path = archive_dir / f"chat_archive_{timestamp}.json"
+
+        with open(archive_path, "w", encoding="utf-8") as f:
+            json.dump(messages, f, ensure_ascii=False, indent=2)
+
+        logging.getLogger("random_recall").info(
+            f"归档已保存：{archive_path}（{len(messages)} 条消息）"
+        )
+    except Exception:
+        logging.getLogger("random_recall").exception(
+            "精简前归档写入失败，跳过本次归档（不影响精简流程）"
+        )
+
+
 def _get_or_create_managers():
     """延迟初始化日记管理器和随机回忆管理器，保存在模块级变量中。"""
     global _diary_manager, _random_recall
@@ -118,6 +143,13 @@ class MemorySystemPlugin(PluginBase):
 
         # ── 3. 注册消息处理器（日记检查 + 随机回忆） ─────────────
         register.register_user_input_processor(_memory_processor)
+
+        # ── 4. 注册精简前归档钩子 ─────────────────────────────────
+        try:
+            from sdk.register import PluginCapabilityRegistry
+            PluginCapabilityRegistry().compact_hooks.append(_on_before_compact)
+        except Exception:
+            pass
 
     # ── 角色名解析 ────────────────────────────────────────────────
 
