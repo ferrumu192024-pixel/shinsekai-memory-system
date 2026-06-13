@@ -210,6 +210,7 @@ def _search_in_messages(
             "context": context_msgs,
         })
 
+    matches.sort(key=lambda m: m.get("match_time") or "", reverse=True)
     return matches
 
 
