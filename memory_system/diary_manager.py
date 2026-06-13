@@ -131,13 +131,18 @@ class DiaryManager:
 
     def _generate_for_date(self, date_str: str, messages: List[Dict[str, Any]], diary_path: Path) -> None:
         """为指定日期生成日记：有对话则正常日记，无对话则空日记占位。"""
+        with self._generating_lock:
+            if date_str in self._pending_dates:
+                logger.info(f"日期 {date_str} 的日记正在生成中，跳过重复触发。")
+                return
+            self._pending_dates.add(date_str)
+
+        # 锁外执行耗时操作
         hot_messages = self._filter_messages_by_date(messages, date_str)
         cold_messages = self._load_archive_messages_by_date(date_str)
         all_messages = self._merge_messages(hot_messages, cold_messages)
 
         if all_messages:
-            # 标记为正在生成，防止竞态条件导致多个线程写同一文件
-            self._pending_dates.add(date_str)
             logger.info(
                 f"准备为 {date_str} 生成日记 "
                 f"（热记忆 {len(hot_messages)} 条，冷记忆 {len(cold_messages)} 条，"
@@ -150,16 +155,18 @@ class DiaryManager:
             )
             thread.start()
         else:
-            # 无对话记录，生成空日记占位
             logger.info(f"日期 {date_str} 无对话记录，生成空日记占位。")
             self._write_empty_diary(date_str, diary_path)
+            with self._generating_lock:
+                self._pending_dates.discard(date_str)
 
     def _generate_diary_with_cleanup(self, date_str: str, messages: List[Dict], diary_path: Path) -> None:
         """调用 _generate_diary，并在完成后从 _pending_dates 中移除标记。"""
         try:
             self._generate_diary(date_str, messages, diary_path)
         finally:
-            self._pending_dates.discard(date_str)
+            with self._generating_lock:
+                self._pending_dates.discard(date_str)
 
     def _write_empty_diary(self, date_str: str, diary_path: Path) -> None:
         """写入空日记占位文件，标记该日期已检查且无对话。"""
