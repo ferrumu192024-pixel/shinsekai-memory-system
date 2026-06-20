@@ -1,6 +1,7 @@
 """
 记忆系统插件：为 AI 桌宠提供长期记忆管理能力。
 包括自动归档、每日日记、精准搜索。
+记忆归属按宿主存档文件隔离，通过 data/chat_history/*.json.tmp 推断当前存档指纹。
 """
 
 import logging
@@ -15,20 +16,21 @@ from sdk.types import (
     RequirementSpec,
 )
 
-from plugins.memory_system.character_context import set_character_name
-
-# ── 插件级管理器引用 ──────────────────────────────────────────────
-_diary_manager = None
-
 
 def _on_before_compact(messages: list) -> None:
-    """精简前钩子：将完整对话写入归档文件。"""
+    """精简前钩子：将完整对话写入当前指纹目录下的归档文件。"""
     try:
         from datetime import datetime
         import json
         from plugins.memory_system.character_context import get_archive_dir
 
         archive_dir = get_archive_dir()
+        if archive_dir is None:
+            logging.getLogger("memory_system").warning(
+                "存档指纹未确认，跳过精简前归档。"
+            )
+            return
+
         archive_dir.mkdir(parents=True, exist_ok=True)
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -46,43 +48,24 @@ def _on_before_compact(messages: list) -> None:
         )
 
 
-def _get_or_create_managers():
-    """延迟初始化日记管理器，保存在模块级变量中。"""
-    global _diary_manager
-
-    if _diary_manager is not None:
-        return
-
+def _memory_processor(user_input: str) -> str | None:
+    """用户输入处理器：尝试确认存档指纹，首次确认后触发日记补写。"""
     try:
-        from core.runtime.app_runtime import try_get_app_runtime
-        runtime = try_get_app_runtime()
-        if not runtime or not hasattr(runtime, "llm_manager"):
-            return
-        llm = runtime.llm_manager
-
-        from plugins.memory_system.diary_manager import DiaryManager
-        _diary_manager = DiaryManager(llm.llm_adapter)
-    except Exception:
-        logging.getLogger("memory_system").exception(
-            "Failed to initialize diary manager"
+        from plugins.memory_system.character_context import (
+            resolve_fingerprint,
+            get_archive_dir,
         )
 
+        # resolve_fingerprint 内部会在第二条消息时才实际扫描 .tmp
+        fingerprint = resolve_fingerprint()
 
-def _memory_processor(user_input: str) -> str | None:
-    """用户输入处理器：触发日记检查。"""
-    try:
-        from plugins.memory_system.character_context import refresh_character_name
-        refresh_character_name()  # 每次处理前对齐当前活跃角色
-
-        _get_or_create_managers()
-
-        if _diary_manager is not None:
-            from core.runtime.app_runtime import try_get_app_runtime
-            runtime = try_get_app_runtime()
-            if runtime and hasattr(runtime, "llm_manager"):
-                _diary_manager.check_and_generate(
-                    runtime.llm_manager.get_messages()
-                )
+        # 如果本次调用刚好确认了指纹（返回值非 None 且此前未确认），触发一次日记补写
+        if fingerprint is not None:
+            archive_dir = get_archive_dir()
+            if archive_dir is not None:
+                from plugins.memory_system.diary_manager import DiaryManager
+                dm = DiaryManager()
+                dm.generate_all_missing_diaries()
 
         return user_input
     except Exception:
@@ -101,7 +84,7 @@ class MemorySystemPlugin(PluginBase):
 
     @property
     def plugin_version(self) -> str:
-        return "0.1.0"
+        return "0.2.0"
 
     @property
     def plugin_name(self) -> str:
@@ -117,55 +100,22 @@ class MemorySystemPlugin(PluginBase):
         plugin_root: Path,
         host: PluginHostContext,
     ) -> None:
-        # ── 0. 获取当前角色名，设置记忆隔离 ──────────────────────
-        character_name = self._resolve_character_name(host)
-        self._set_character(character_name)
-
         # ── 1. 注册 LLM 工具 ──────────────────────────────────────
         self._register_tools(register)
 
         # ── 2. 注入系统提示词规则 ─────────────────────────────────
         self._patch_prompt(register)
 
-        # ── 3. 注册消息处理器（日记检查） ─────────────────────────
+        # ── 3. 注册消息处理器（指纹确认 + 日记补写） ─────────────
         register.register_user_input_processor(_memory_processor)
 
         # ── 4. 注册精简前归档钩子 ─────────────────────────────────
         register.compact_hooks.append(_on_before_compact)
 
-    # ── 角色名解析 ────────────────────────────────────────────────
-
-    def _resolve_character_name(self, host: PluginHostContext) -> str:
-        """从宿主上下文解析当前活跃角色名。"""
-        # 优先从 host 直接获取
-        name = getattr(host, "character_name", None)
-        if name:
-            return str(name).strip()
-
-        # 备选：从 AppRuntime 的配置中读取第一个角色名
-        try:
-            from core.runtime.app_runtime import try_get_app_runtime
-            runtime = try_get_app_runtime()
-            if runtime and hasattr(runtime, "config"):
-                characters = runtime.config.config.characters
-                if characters:
-                    first = characters[0]
-                    if hasattr(first, "name"):
-                        return str(first.name).strip()
-                    return str(first).strip()
-        except Exception:
-            pass
-
-        return "default"
-
-    def _set_character(self, character_name: str) -> None:
-        """将当前角色名传递给记忆系统的所有模块（通过 character_context）。"""
-        set_character_name(character_name)
-
     # ── 工具注册 ──────────────────────────────────────────────────
 
     def _register_tools(self, register: PluginCapabilityRegistry) -> None:
-        """直接从插件目录加载并注册工具，不依赖 llm/tools/ 的导入链"""
+        """直接从插件目录加载并注册工具。"""
         from plugins.memory_system.tools.archive_tools import _register_archive_tools
         from plugins.memory_system.tools.diary_tools import _register_diary_tools
 
@@ -178,7 +128,7 @@ class MemorySystemPlugin(PluginBase):
     # ── 提示词注入 ────────────────────────────────────────────────
 
     def _patch_prompt(self, register: PluginCapabilityRegistry) -> None:
-        """以 Patch 形式向系统提示词追加记忆相关的规则"""
+        """以 Patch 形式向系统提示词追加记忆相关的规则。"""
         from plugins.memory_system.memory_utils import build_memory_prompt_rules
 
         diary_recall_rule, memory_priority_rule, archive_tool_desc = \

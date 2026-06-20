@@ -3,7 +3,7 @@ Archive tools: search and list historical conversation archives.
 
 功能说明：
     本模块提供两个 LLM 工具，用于搜索和列出通过 compact_manager 自动归档的
-    历史对话文件。归档文件为 JSON 格式，存储在 ./data/archives/<角色名>/ 目录下，
+    历史对话文件。归档文件为 JSON 格式，存储在 ./data/archives/<存档指纹>/ 目录下，
     文件名格式为 chat_archive_YYYYMMDD_HHMMSS.json。
 
 工具列表：
@@ -24,6 +24,7 @@ AI 查询建议路径：
     - 搜索使用简单的子串匹配（大小写不敏感），未来可升级为 jieba 分词索引。
     - 时间提取依赖用户消息中的 [本地时间 YYYY-MM-DD HH:MM:SS] 前缀。
     - 所有磁盘 I/O 异常均被捕获并记录日志，不会中断对话。
+    - 所有搜索和列表操作仅限当前存档指纹目录，不同存档的记忆完全隔离。
 """
 
 from __future__ import annotations
@@ -42,13 +43,14 @@ logger = logging.getLogger(__name__)
 
 def _list_archive_files() -> List[Path]:
     """
-    获取所有归档文件的路径列表（按文件名倒序，最新的在前）。
+    获取当前存档指纹目录下所有归档文件的路径列表（按文件名倒序，最新的在前）。
 
     Returns:
-        List[Path]: 归档 JSON 文件的 Path 对象列表，若目录不存在则返回空列表。
+        List[Path]: 归档 JSON 文件的 Path 对象列表。
+                   若目录不存在或指纹未确认，则返回空列表。
     """
     archive_dir = get_archive_dir()
-    if not archive_dir.exists():
+    if archive_dir is None or not archive_dir.is_dir():
         return []
     files = sorted(
         [f for f in archive_dir.glob("chat_archive_*.json") if f.is_file()],
@@ -218,7 +220,7 @@ def _search_in_messages(
 
 def _tool_archive_list() -> list[dict]:
     """
-    列出所有可用的归档文件及其基本信息，包括时间范围。
+    列出当前存档下所有可用的归档文件及其基本信息，包括时间范围。
 
     这是 AI 定位历史对话的第一步：先看有哪些归档文件，
     每个文件覆盖什么时间段（first_time ~ last_time），
@@ -231,7 +233,7 @@ def _tool_archive_list() -> list[dict]:
             - message_count: 消息总数
             - first_time:    文件中最早一条带时间戳的消息时间
             - last_time:     文件中最晚一条带时间戳的消息时间
-        若无归档文件，返回空列表。
+        若无归档文件或指纹未确认，返回空列表。
     """
     files = _list_archive_files()
     result = []
@@ -258,7 +260,7 @@ def _tool_archive_search(
     to_time: str = "",
 ) -> dict[str, Any]:
     """
-    搜索归档文件中的历史对话，支持关键词（可选）和时间范围（可选）过滤。
+    搜索当前存档的归档文件中的历史对话，支持关键词（可选）和时间范围（可选）过滤。
 
     默认只扫描最新的 10 个归档文件。如需搜索更早的对话，可增大 max_files。
     建议先用 archive_list 确认目标时间段，再用本工具精准搜索。

@@ -1,15 +1,13 @@
 """
-日记管理器：自动为每一天的对话生成一份日记摘要。
+日记管理器：在路径确认后，为最近两周内缺失的日期补写日记。
 日记以"对话日"为单位，每天凌晨 4:00 到次日凌晨 3:59 为一个对话日。
-每 10 条消息检查一次，自动补写最近两周内所有缺失日期的日记（跳过已有日记）。
-有消息则生成正常日记，无消息则生成空日记占位，确保日记名单的完整性。
-生成日记时，自动合并热记忆（当前上下文）和冷记忆（归档文件）中属于该日的消息。
+有消息则生成正常日记，无消息则生成空日记占位。
+生成日记时，合并热记忆（当前上下文）和当前存档指纹目录下所有归档文件（冷记忆）中属于该日的消息。
 """
 
 import json
 import os
 import re
-import threading
 import logging
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -20,33 +18,31 @@ from plugins.memory_system.memory_utils import extract_time_from_message
 
 logger = logging.getLogger(__name__)
 
-# ── 模块级状态（单例约束） ──────────────────────────────────────
-_message_count = 0
-
 
 class DiaryManager:
-    """管理日记的自动生成与存储"""
+    """管理日记的补写与存储。"""
 
-    CHECK_INTERVAL = 10          # 每 10 条消息检查一次
-    SCAN_RANGE_DAYS = 14         # 补写范围：从昨天往回推 14 天
+    SCAN_RANGE_DAYS = 14  # 补写范围：从昨天往回推 14 天
 
-    def __init__(self, llm_adapter):
-        """
-        Args:
-            llm_adapter: LLM 适配器实例，用于调用 AI 生成日记
-        """
-        self.llm_adapter = llm_adapter
-        self._generating_lock = threading.Lock()
-        self._pending_dates: set = set()  # 正在生成日记的日期集合，防止竞态条件
-        os.makedirs(get_archive_dir(), exist_ok=True)
+    def __init__(self):
+        # 延迟初始化，不再在构造时持有 llm_adapter 或创建目录
+        pass
+
+    def _get_llm_adapter(self):
+        """每次调用时从运行时获取 LLM 适配器，避免初始化时依赖。"""
+        try:
+            from core.runtime.app_runtime import try_get_app_runtime
+            runtime = try_get_app_runtime()
+            if runtime and hasattr(runtime, "llm_manager"):
+                return runtime.llm_manager.llm_adapter
+        except Exception:
+            logger.exception("获取 LLM 适配器失败")
+        return None
 
     def _get_previous_day_str(self) -> str:
         """
         返回昨天的日期字符串（刚完结的对话日）。
         规则：每天凌晨 4:00 划断。
-        例如：
-          - 6月2日 03:00 → 当前仍在 6月1日的对话日，昨天是 5月31日，返回 "20260531"
-          - 6月2日 05:00 → 当前已在 6月2日的对话日，昨天是 6月1日，返回 "20260601"
         """
         now = datetime.now()
         if now.hour < 4:
@@ -63,8 +59,10 @@ class DiaryManager:
         return start.strftime("%Y%m%d")
 
     def _get_existing_diary_dates(self) -> set:
-        """扫描归档目录，返回已有日记文件的日期集合。"""
+        """扫描当前指纹目录，返回已有日记文件的日期集合。"""
         archive_dir = get_archive_dir()
+        if archive_dir is None or not archive_dir.is_dir():
+            return set()
         existing = set()
         for fp in archive_dir.glob("diary_*.json"):
             try:
@@ -76,10 +74,7 @@ class DiaryManager:
         return existing
 
     def _date_range(self, start_date: str, end_date: str) -> List[str]:
-        """
-        生成从 start_date 到 end_date（含）的所有日期字符串列表。
-        日期格式 YYYYMMDD。
-        """
+        """生成从 start_date 到 end_date（含）的所有日期字符串列表。"""
         if not start_date or not end_date:
             return []
         try:
@@ -87,10 +82,8 @@ class DiaryManager:
             end = datetime.strptime(end_date, "%Y%m%d").date()
         except ValueError:
             return []
-
         if start > end:
             return []
-
         dates = []
         current = start
         while current <= end:
@@ -98,50 +91,43 @@ class DiaryManager:
             current += timedelta(days=1)
         return dates
 
-    def check_and_generate(self, messages: List[Dict[str, Any]]) -> None:
-        """
-        每 CHECK_INTERVAL 条消息检查一次。
-        扫描昨天往前 SCAN_RANGE_DAYS 天范围内的所有日期，
-        已有日记跳过，缺失的补写（有消息则正常日记，无消息则空日记占位）。
-        今天的日记不写。
-        """
-        global _message_count
+    # ── 对外暴露的唯一入口 ──────────────────────────────────────
 
-        _message_count += 1
-        if _message_count < self.CHECK_INTERVAL:
+    def generate_all_missing_diaries(self) -> None:
+        """
+        扫描当前指纹目录，为最近两周内缺失的日期补写日记。
+        路径未确认时跳过。
+        """
+        archive_dir = get_archive_dir()
+        if archive_dir is None:
+            logger.info("存档指纹未确认，跳过日记补写。")
             return
-        _message_count = 0
 
-        # 确保当前角色目录存在（归档钩子可能尚未触发）
-        os.makedirs(get_archive_dir(), exist_ok=True)
+        os.makedirs(archive_dir, exist_ok=True)
 
-        # 扫描范围：从 scan_start 到昨天
         scan_start = self._get_scan_start_date()
         yesterday = self._get_previous_day_str()
 
         all_dates = self._date_range(scan_start, yesterday)
         if not all_dates:
+            logger.info("无待补写日期范围。")
             return
 
         existing_dates = self._get_existing_diary_dates()
 
         for date_str in all_dates:
-            if date_str in existing_dates or date_str in self._pending_dates:
+            if date_str in existing_dates:
                 continue
 
-            diary_path = get_archive_dir() / f"diary_{date_str}.json"
-            self._generate_for_date(date_str, messages, diary_path)
+            diary_path = archive_dir / f"diary_{date_str}.json"
+            self._generate_for_date(date_str, diary_path)
 
-    def _generate_for_date(self, date_str: str, messages: List[Dict[str, Any]], diary_path: Path) -> None:
-        """为指定日期生成日记：有对话则正常日记，无对话则空日记占位。"""
-        with self._generating_lock:
-            if date_str in self._pending_dates:
-                logger.info(f"日期 {date_str} 的日记正在生成中，跳过重复触发。")
-                return
-            self._pending_dates.add(date_str)
+    # ── 单日生成 ────────────────────────────────────────────────
 
-        # 锁外执行耗时操作
-        hot_messages = self._filter_messages_by_date(messages, date_str)
+    def _generate_for_date(self, date_str: str, diary_path: Path) -> None:
+        """为指定日期生成日记：合并热记忆 + 当前指纹目录下所有归档文件中该日期的消息。"""
+        # 从运行时获取当前热记忆
+        hot_messages = self._get_hot_messages_by_date(date_str)
         cold_messages = self._load_archive_messages_by_date(date_str)
         all_messages = self._merge_messages(hot_messages, cold_messages)
 
@@ -151,47 +137,27 @@ class DiaryManager:
                 f"（热记忆 {len(hot_messages)} 条，冷记忆 {len(cold_messages)} 条，"
                 f"合并后 {len(all_messages)} 条）..."
             )
-            thread = threading.Thread(
-                target=self._generate_diary_with_cleanup,
-                args=(date_str, all_messages, diary_path),
-                daemon=True
-            )
-            thread.start()
+            self._generate_diary(date_str, all_messages, diary_path)
         else:
             logger.info(f"日期 {date_str} 无对话记录，生成空日记占位。")
             self._write_empty_diary(date_str, diary_path)
-            with self._generating_lock:
-                self._pending_dates.discard(date_str)
 
-    def _generate_diary_with_cleanup(self, date_str: str, messages: List[Dict], diary_path: Path) -> None:
-        """调用 _generate_diary，并在完成后从 _pending_dates 中移除标记。"""
+    def _get_hot_messages_by_date(self, date_str: str) -> List[Dict]:
+        """从当前热记忆中获取指定日期的消息。"""
         try:
-            self._generate_diary(date_str, messages, diary_path)
-        finally:
-            with self._generating_lock:
-                self._pending_dates.discard(date_str)
+            from core.runtime.app_runtime import try_get_app_runtime
+            runtime = try_get_app_runtime()
+            if runtime and hasattr(runtime, "llm_manager"):
+                messages = runtime.llm_manager.get_messages()
+                return self._filter_messages_by_date(messages, date_str)
+        except Exception:
+            logger.exception("获取热记忆失败")
+        return []
 
-    def _write_empty_diary(self, date_str: str, diary_path: Path) -> None:
-        """写入空日记占位文件，标记该日期已检查且无对话。"""
-        empty_diary = {
-            "date": date_str,
-            "summary": "",
-            "keywords": [],
-            "mood": "",
-            "notable_events": [],
-            "empty": True,
-        }
-        try:
-            with open(diary_path, "w", encoding="utf-8") as f:
-                json.dump(empty_diary, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            logger.error(f"写入空日记失败 {date_str}: {e}")
+    # ── 以下方法从旧代码保留，逻辑不变 ──────────────────────────
 
     def _filter_messages_by_date(self, messages: List[Dict], date_str: str) -> List[Dict]:
-        """
-        从消息列表中筛选出属于指定对话日的消息。
-        对话日范围：当日 04:00:00 到次日 03:59:59。
-        """
+        """从消息列表中筛选出属于指定对话日的消息。"""
         try:
             target_date = datetime.strptime(date_str, "%Y%m%d").date()
             day_start = datetime.combine(target_date, datetime.min.time()) + timedelta(hours=4)
@@ -207,9 +173,11 @@ class DiaryManager:
         return filtered
 
     def _load_archive_messages_by_date(self, date_str: str) -> List[Dict]:
-        """
-        从所有归档文件中加载属于指定日期的消息（冷记忆）。
-        """
+        """从当前指纹目录下所有归档文件中加载属于指定日期的消息。"""
+        archive_dir = get_archive_dir()
+        if archive_dir is None or not archive_dir.is_dir():
+            return []
+
         try:
             target_date = datetime.strptime(date_str, "%Y%m%d").date()
             day_start = datetime.combine(target_date, datetime.min.time()) + timedelta(hours=4)
@@ -218,7 +186,7 @@ class DiaryManager:
             return []
 
         cold_messages = []
-        archive_files = sorted(get_archive_dir().glob("chat_archive_*.json"))
+        archive_files = sorted(archive_dir.glob("chat_archive_*.json"))
 
         for fp in archive_files:
             try:
@@ -237,10 +205,7 @@ class DiaryManager:
         return cold_messages
 
     def _merge_messages(self, hot: List[Dict], cold: List[Dict]) -> List[Dict]:
-        """
-        合并热记忆和冷记忆，按时间戳排序并去重。
-        去重依据：去掉时间前缀后的消息内容完全相同则视为重复。
-        """
+        """合并热记忆和冷记忆，按时间戳排序并去重。"""
         seen = set()
         merged = []
 
@@ -255,12 +220,27 @@ class DiaryManager:
                 seen.add(clean)
                 merged.append(msg)
 
-        from datetime import datetime as dt
-        merged.sort(key=lambda m: extract_time_from_message(m) or dt.min)
+        merged.sort(key=lambda m: extract_time_from_message(m) or datetime.min)
         return merged
 
+    def _write_empty_diary(self, date_str: str, diary_path: Path) -> None:
+        """写入空日记占位文件。"""
+        empty_diary = {
+            "date": date_str,
+            "summary": "",
+            "keywords": [],
+            "mood": "",
+            "notable_events": [],
+            "empty": True,
+        }
+        try:
+            with open(diary_path, "w", encoding="utf-8") as f:
+                json.dump(empty_diary, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"写入空日记失败 {date_str}: {e}")
+
     def _generate_diary(self, date_str: str, messages: List[Dict], diary_path: Path) -> None:
-        """后台线程：调用 LLM 生成日记并保存到文件。"""
+        """调用 LLM 生成日记并保存到文件。"""
         try:
             logger.info(f"开始生成日记: {date_str}")
             prompt = self._build_diary_prompt(messages, date_str)
@@ -306,12 +286,17 @@ class DiaryManager:
 
     def _call_llm_for_diary(self, prompt: str) -> Optional[Dict]:
         """调用 LLM 并解析返回的 JSON。"""
+        llm = self._get_llm_adapter()
+        if llm is None:
+            logger.error("无法获取 LLM 适配器，跳过日记生成。")
+            return None
+
         try:
             messages = [
                 {"role": "system", "content": "你是一个专业的日记助手，负责将对话历史总结为 JSON 格式的日记。请严格遵守 JSON 输出格式。"},
                 {"role": "user", "content": prompt}
             ]
-            response = self.llm_adapter.chat(messages, stream=False)
+            response = llm.chat(messages, stream=False)
 
             if not response:
                 return None
