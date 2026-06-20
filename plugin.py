@@ -109,8 +109,8 @@ class MemorySystemPlugin(PluginBase):
         # ── 3. 注册消息处理器（指纹确认 + 日记补写） ─────────────
         register.register_user_input_processor(_memory_processor)
 
-        # ── 4. 注册精简前归档钩子 ─────────────────────────────────
-        register.compact_hooks.append(_on_before_compact)
+        # ── 4. 注册精简前归档钩子（使用专用方法，避免追加到副本） ─
+        register.register_compact_hook(_on_before_compact)
 
     # ── 工具注册 ──────────────────────────────────────────────────
 
